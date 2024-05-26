@@ -36,7 +36,7 @@ if __name__ == "__main__":
     reactant = read_any(args[0])
 
     # get database params
-    db = local_db.LocalDB(options.alias)
+    db = LocalDB(options.alias)
     params = db.get_params()
 
     #create instance of LocalQuery and run query()
