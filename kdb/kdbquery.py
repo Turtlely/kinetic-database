@@ -17,6 +17,15 @@ try:
 except ImportError:
     warnings.warn('failed to import Networkx, will use default method', ImportWarning)
 
+if USE_GPU:
+    try: # Try to import GSI
+        import GSI
+    except ImportError:
+        warnings.warn('failed to import GSI, changing to default method', ImportWarning)
+        GRAPH = False
+        print("Augh")
+
+
 __all__ = ["KdbQuery"]
 
 debug = False  # set to True to print out debugging print statements
@@ -193,8 +202,44 @@ class KdbQuery(Kdb):
 
             final_data = [entry['id'], kdbmobile, Reactant_Graph.number_of_nodes(), Reactant_Graph.number_of_edges(), Selected_Graph.number_of_nodes(), Selected_Graph.number_of_edges(), nx.number_connected_components(Selected_Graph)] if debug else None
 
+            '''
+            print("Reactant Graph:")
+            print(Reactant_Graph)
+
+            print("Selected Graph:")
+            print(Selected_Graph)
+            '''
             for mapping in GM.subgraph_isomorphisms_iter():
+                #print(mapping)
                 mappings.append(mapping)
+
+            
+            #print(len(mappings) != 0, Selected_Graph)
+            '''
+            import GSI
+            GSI.print_nx_graph(Selected_Graph)
+            print("Directed? ", nx.is_directed(Selected_Graph))
+            '''
+            ''' TESTING'''
+            '''
+            print("_________________________________________________")
+            print("Reactant Graph:")
+            print(Reactant_Graph)
+            print(Reactant_Graph.nodes('symbol'))
+            nx.write_gml(Reactant_Graph, "reactant.gml",stringizer=str)
+            print()
+            print("KDB Graph:")
+            print(Selected_Graph)
+            print(Selected_Graph.nodes('symbol'))
+            nx.write_gml(Selected_Graph, f"{Selected_Graph}.gml",stringizer=str)
+            print()
+            print(f"{len(mappings)} Mappings Found:")
+            for mapping in mappings:
+                print(mapping)
+            print("_________________________________________________")
+            '''
+            '''END TESTING'''
+
 
         else:
                 # For each mobile atom in kdbmin, create a list of neighboring element
@@ -458,6 +503,272 @@ class KdbQuery(Kdb):
         output.append("KDB matches: %s" % numMatches)
         return("\n".join(output), self.return_dict, final_data, numMatches)
 
+    def query_kdb_entry_GPU(self, name, reactantNeighbors, reactantNameCount, Reactant_Graph, reactant, outputdir, nf, dc, nodupes, kdbname, GRAPH, entry):
+        start = time.time()
+        output = ["Process {}: Name: %s ID: %s" % (name, entry['id'])]
+        final_data = []
+        numMatches = 0
+        mirrored = "not mirrored"
+        if entry["mirror"]:
+            mirrored = "mirrored"
+
+        # Load the minimum
+        kdbmin = copy.deepcopy(entry['minimum'])
+
+        # Make sure the reactant has at least as many atoms of each type as the kdb configuration
+        passedNameCount = True
+        kdbNameCount = self.similar_atom_nameCount(kdbmin,USE_GROUP_SIMILARITY) # Same function call for kdbNameCount
+        for name in kdbNameCount:
+            if name not in reactantNameCount:
+                passedNameCount = False
+                break
+            if kdbNameCount[name] > reactantNameCount[name]:
+                passedNameCount = False
+                break
+        if not passedNameCount:
+            output.append("%10s  name count fail" % entry['id'])
+            return ("\n".join(output), self.return_dict, [entry['id'], "name count failed", str(time.time() - start)[0:5]], 0)
+        else:
+            pass
+            #print ("Passed Name Count")
+            # Check if using graph method for mappings
+
+        #mappings = []
+
+        kdbmobile = copy.deepcopy(entry['mobile'])
+        kdbmobile_radii = dict([ (m, elements[kdbmin.get_chemical_symbols()[m]]['radius']) for m in kdbmobile ])
+
+        clump_order = self.convertClumpOrder(entry['clump_order'])
+
+        Selected_Graph = GraphMaker.graph_kdbentry(self, kdbmin, reactant, nf)
+
+        # Use GPU instead
+
+        # Initialize GPU
+        GSI.initGPU(verbose=False)
+
+        # Process the reactant and kdb graph
+
+        '''
+        print("1A Reactant Graph:")
+        print(Reactant_Graph)
+
+        print("2A Selected Graph:")
+        print(Selected_Graph)
+        '''
+
+        # Find isomorphisms
+
+        emap = GSI.encodeLabels(Reactant_Graph)
+
+        _RG = GSI.chemGraphProcess(Reactant_Graph, emap)
+        _SG = GSI.chemGraphProcess(Selected_Graph, emap)
+
+        data, algo_map_data = GSI.nxGraph(_RG, bidirectional = True, column_oriented = True)
+        query, algo_map_query = GSI.nxGraph(_SG, bidirectional = False, column_oriented = False)
+    
+        _bool, res = GSI.findIsomorphism(query, data)
+
+        mappings = []
+
+        for mapping in res:
+            _mapping= {algo_map_query[key]: algo_map_data[val] for key, val in mapping.items()}
+            #print(_mapping)
+            mappings.append(_mapping)
+
+        final_data = [entry['id'], kdbmobile, Reactant_Graph.number_of_nodes(), Reactant_Graph.number_of_edges(), Selected_Graph.number_of_nodes(), Selected_Graph.number_of_edges(), nx.number_connected_components(Selected_Graph)] if debug else None
+
+        ''' TESTING'''
+        '''
+        print("_________________________________________________")
+        print("Reactant Graph:")
+        print(Reactant_Graph)
+        print(Reactant_Graph.nodes('symbol'))
+        nx.write_gml(Reactant_Graph, "reactant.gml",stringizer=str)
+        print()
+        print("KDB Graph:")
+        print(Selected_Graph)
+        print(Selected_Graph.nodes('symbol'))
+        nx.write_gml(Selected_Graph, f"{Selected_Graph}.gml",stringizer=str)
+        print()
+        print(f"{len(mappings)} Mappings Found:")
+        for mapping in mappings:
+            print(mapping)
+        print("_________________________________________________")
+        '''
+        '''END TESTING'''
+
+        debug and final_data.append(len(mappings))
+
+        uniques = []  # will store list of unique suggestions
+        dc2 = dc * dc
+
+        # Load the mode and barriers for the process
+        mode = copy.deepcopy(entry['mode'])
+        if 'barrier' in entry:
+            proc_barriers = copy.deepcopy(entry['barrier'])
+
+        kdb_centroid = numpy.mean(kdbmin.positions, axis=0)
+        kdb_shifted = kdbmin.positions - kdb_centroid
+        kdb_shifted_T = kdb_shifted.transpose()
+        del kdbmin
+
+        kdbSaddle_shifted = entry['saddle'].positions - kdb_centroid
+        kdbProduct_shifted = entry['product'].positions - kdb_centroid
+
+        # check if entry is coplanar
+        H = numpy.dot(kdb_shifted_T, kdb_shifted)
+        _, S, _ = numpy.linalg.svd(H)  # numpy orders singular values from max to min
+        normalized_min_sv = S[2] / len(kdb_shifted)
+        if normalized_min_sv < dc2:  # arbitrary cutoff that seems to work very well
+            is_coplanar = True
+        else:
+            is_coplanar = False
+
+        # Loop over each mapping and try to find a rotation that aligns the
+        # kdb configuration with the query configuration
+        # this is done in the separate function below
+        num_low_scores = 0
+        num_overlap_pass = 0
+        for mapping in mappings:
+            output.append("mapping %s" % mapping)
+
+            # current Python implementation guarantees that keys and values are called in the same order if dict is not modified in between
+            kdb_atom_indices = list(mapping.keys())
+            reactant_atom_indices = list(mapping.values())
+
+            mapped_kdbmobile = [mapping[i] for i in kdbmobile]
+            mapped_clump_order = [mapping[i] for i in clump_order]
+
+            # clump gets rid of PBC and attempts to moves mapped reactant atoms into the same spatial orientation as kdb
+            #reactantrot = fmodules.kdb.clump(reactant.positions, reactant_atom_indices, reactant.cell, reactant.ibox)
+            reactantrot = fmodules.kdb.ordered_clump(reactant.positions, mapped_clump_order, reactant.cell, reactant.ibox)
+
+            # SJ: Horn algorithm using SVD ("Least-Squares Fitting of Two 3-D Point Sets" by Arun, Huang, and Blostein)
+            reactant_centroid = numpy.mean(reactantrot[reactant_atom_indices], axis=0)
+            reactant_shifted = reactantrot[reactant_atom_indices] - reactant_centroid
+            H = numpy.dot(kdb_shifted_T[:, kdb_atom_indices], reactant_shifted)  # including the indices ensures correct order
+            U, _, V = numpy.linalg.svd(H)
+            for mirror_check in range(1, -1*is_coplanar - 1, -2):  # loops twice only if is_coplanar
+                V[2] *= mirror_check
+                Rmat = numpy.dot(U, V)  # implicitly includes mirroring if necessary
+
+                kdb_shifted_rotated = numpy.dot(kdb_shifted[kdb_atom_indices], Rmat)
+                diff = kdb_shifted_rotated - reactant_shifted
+                score = max(numpy.sum(diff*diff, axis=1))
+                # print('\nscore:', score)
+                # print('mapping:', mapping)
+                output.append("Score: %s" % score)
+
+                if score > dc2:
+                    continue
+
+                num_low_scores += 1
+
+                # apply transformations on product
+                kdbProduct = numpy.dot(kdbProduct_shifted, Rmat)
+                kdbProduct += reactant_centroid
+
+                # create suggested product and check overlap along the way
+                overlap = False
+                sugproduct = reactant.copy()  #XXX: what if the unit cell vectors change?
+                sugproduct.radii = reactant.radii
+                try:  # only works for graph method
+                    atoms_to_check = set()
+                    for atom in reactant_atom_indices:
+                        neighbors = Reactant_Graph[atom]
+                        atoms_to_check = atoms_to_check.union(neighbors)
+                    atoms_to_check = atoms_to_check.difference(reactant_atom_indices)
+                except TypeError:
+                    atoms_to_check = set(range(len(sugproduct))).difference(reactant_atom_indices)
+                if sugproduct.constraints:  # has one or more constrained atom(s)
+                    for m in mapping:
+                        if mapping[m] not in sugproduct.constraints[0].index:
+                            if m in kdbmobile:
+                                if self.check_overlap(kdbProduct[m], kdbmobile_radii[m], sugproduct, atoms_to_check, reactant.ibox):
+                                    overlap = True
+                                    break
+                            sugproduct.positions[mapping[m]] = kdbProduct[m]
+                else:  # no constraints
+                    for m in mapping:
+                        if m in kdbmobile:
+                            if self.check_overlap(kdbProduct[m], kdbmobile_radii[m], sugproduct, atoms_to_check, reactant.ibox):
+                                overlap = True
+                                break
+                        sugproduct.positions[mapping[m]] = kdbProduct[m]
+                if overlap:
+                    continue
+                num_overlap_pass += 1
+
+                # apply transformations on saddle
+                kdbSaddle = numpy.dot(kdbSaddle_shifted, Rmat)
+                kdbSaddle += reactant_centroid
+
+                # Create the suggestion
+                suggestion = reactant.copy()  #XXX: what if the unit cell vectors change?
+                if suggestion.constraints:  # has one or more constrained atom(s)
+                    for m in mapping:
+                        if mapping[m] not in suggestion.constraints[0].index:
+                            suggestion.positions[mapping[m]] = kdbSaddle[m]
+                else:  # no constraints
+                    suggestion.positions[reactant_atom_indices] = kdbSaddle[kdb_atom_indices]
+
+                # Check for duplicates
+                if nodupes == 1:
+                    if self.check_duplicates_1(suggestion, sugproduct, uniques, dc, reactant.ibox):
+                        continue
+                elif nodupes == 2:
+                    if self.check_duplicates_2(suggestion, sugproduct, mapped_kdbmobile, uniques, dc, reactant.ibox):
+                        continue
+                elif nodupes == 3:
+                    if self.check_duplicates_3(suggestion, sugproduct, mapping, mapped_kdbmobile, uniques, dc, reactant.ibox):
+                        continue
+
+                #  Map the mode
+                if mode is not None:
+                    modeTemp = reactant.positions * 0.0
+                    #for m in mapping:  # old way
+                        #modeTemp[mapping[m]] = mode[m]
+                    modeTemp[reactant_atom_indices] = mode[kdb_atom_indices]
+                    try:
+                        modeTemp /= numpy.linalg.norm(modeTemp)  # XXX: is this correct? (SJ)
+                    except FloatingPointError:
+                        mode = None
+
+                # Perform the mode transformation
+                if mode is not None:
+                    modeTemp = numpy.dot(modeTemp, Rmat)
+
+                # Rebox
+                if REBOX_SUGGESTIONS:  #TODO: still need to fix
+                    adjustment = 0.5 * (suggestion.cell[0] + suggestion.cell[1] + suggestion.cell[2])
+                    temp = suggestion.positions - adjustment
+                    suggestion.positions = fmodules.kdb.pbcs(temp, suggestion.cell, reactant.ibox) + adjustment
+                    temp = sugproduct.positions - adjustment
+                    sugproduct.positions = fmodules.kdb.pbcs(temp, suggestion.cell, reactant.ibox) + adjustment
+
+                # Write suggestion
+                if mode is not None:
+                    if KEEP_BARRIERS:
+                        self.output_query(outputdir, numMatches, suggestion, sugproduct, entry, modeTemp, processBarrier=proc_barriers, score=score)
+                    else:
+                        self.output_query(outputdir, numMatches, suggestion, sugproduct, entry, modeTemp, score=score)
+                else:
+                    if KEEP_BARRIERS:
+                        self.output_query(outputdir, numMatches, suggestion, sugproduct, entry, processBarrier=proc_barriers, score=score)
+                    else:
+                        self.output_query(outputdir, numMatches, suggestion, sugproduct, entry, score=score)
+                numMatches += 1
+
+        if debug:
+            final_data.append(num_low_scores)
+            final_data.append(num_overlap_pass)
+            final_data.append(numMatches)
+            final_data.append(str(time.time() - start)[0:5])
+
+        output.append("KDB matches: %s" % numMatches)
+        return("\n".join(output), self.return_dict, final_data, numMatches)
+
 
     def query(self, reactant, outputdir = "./kdbmatches", nf=0.2, dc=0.3, nodupes = 0, kdbname = 'kdb.db', custom_config=None, pipe=None,local_query=False):
         # XXX: I think the best way forward to allow parallel processes
@@ -513,6 +824,9 @@ class KdbQuery(Kdb):
 
         reactant.radii = NeighborList_helper.natural_cutoffs(reactant)
 
+        if USE_GPU:
+            print("Using GPU accelerated subgraph isomorphism check")
+
         if GRAPH:
             print("Using graph method")
             Reactant_Graph = GraphMaker.graph_reactant(self, reactant, nf)
@@ -549,9 +863,14 @@ class KdbQuery(Kdb):
         cpuCount = mp.cpu_count()  # number of processors available (manually set to 1 to disable parallelization)
         with mp.Pool(cpuCount) as pool:
             dummy_dict = {}
-            func = partial(self.query_kdb_entry, name, reactantNeighbors, reactantNameCount,
-                           Reactant_Graph, reactant, outputdir, nf, dc , nodupes, kdbname, GRAPH,
-                           )
+            if USE_GPU and USE_GRAPH:
+                func = partial(self.query_kdb_entry_GPU, name, reactantNeighbors, reactantNameCount,
+                               Reactant_Graph, reactant, outputdir, nf, dc , nodupes, kdbname, GRAPH,
+                               )
+            else:
+                func = partial(self.query_kdb_entry, name, reactantNeighbors, reactantNameCount,
+                               Reactant_Graph, reactant, outputdir, nf, dc , nodupes, kdbname, GRAPH,
+                               )                
             unique_id = 0
             matches_counter = 0
             debug and print("\nid, mobile, G1 nodes, G1 edges, G2 nodes, G2 edges, disconnected, mappings, low scores, no overlap, matches, time")

@@ -13,6 +13,7 @@ USE_GROUP_SIMILARITY = False
 KDB_NAME = 'kdb.db'
 OUTPUT_DIR = "./kdbmatches"
 USE_GRAPH = True
+USE_GPU = True
 
 # Can easily be made into a non-python file
 # Sent over bottle and compared to server-side values

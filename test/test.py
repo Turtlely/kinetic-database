@@ -167,7 +167,7 @@ def local_test():
     # test insert with local sqlite3 database
     sys.stdout.write("Testing insert... ")
     sys.stdout.flush()
-    insert_out = subprocess.check_output(["kdb_local_client.py","insert",
+    insert_out = subprocess.check_output(["../bin/kdb_local_client.py","insert",
                     "test_vars/reactant.con","test_vars/saddle.con","test_vars/product.con",
                     "test_vars/mode.dat"])
     insert_out = insert_out.decode('ascii')
@@ -178,7 +178,7 @@ def local_test():
     # test check for duplicates with local sqlite3 database
     sys.stdout.write("Testing insert duplicate check... ")
     sys.stdout.flush()
-    dupcheck_out = subprocess.check_output(["kdb_local_client.py","insert",
+    dupcheck_out = subprocess.check_output(["../bin/kdb_local_client.py","insert",
                     "test_vars/reactant.con","test_vars/saddle.con","test_vars/product.con",
                     "test_vars/mode.dat"])
     dupcheck_out = dupcheck_out.decode('ascii')
@@ -188,7 +188,7 @@ def local_test():
     # test query with local sqlite3 database
     sys.stdout.write("Testing query... ")
     sys.stdout.flush()
-    query_out = subprocess.check_output(["kdb_local_client.py","query","test_vars/reactant.con"])
+    query_out = subprocess.check_output(["../bin/kdb_local_client.py","query","test_vars/reactant.con"])
     query_out = query_out.decode('ascii')
     print(grade_test(query_out, "Finished", "written"))
     logger("QUERY OUTPUT\n" + query_out + "\n")
